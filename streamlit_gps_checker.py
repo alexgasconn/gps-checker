@@ -7,6 +7,7 @@ import pandas as pd
 import pydeck as pdk
 import time
 from datetime import datetime
+import altair as alt
 
 st.set_page_config(page_title="GPS Interference & Precision Analyzer", layout="wide")
 
@@ -213,6 +214,32 @@ if uploaded_file:
                 )
             ],
         ))
+
+        # Gráficas secundarias
+        st.subheader("📈 Calidad GPS (%) vs. Puntos del recorrido")
+        quality_series = [1 if i in danger_indices else 0 for i in range(len(points))]
+        df_quality = pd.DataFrame({
+            "Punto": list(range(len(points))),
+            "Riesgo": quality_series
+        })
+
+        st.altair_chart(
+            alt.Chart(df_quality).mark_line().encode(
+                x="Punto",
+                y=alt.Y("Riesgo", title="Riesgo de interferencia (1 = sí)"),
+            ).properties(title="Calidad GPS a lo largo del recorrido", height=200),
+            use_container_width=True
+        )
+
+        st.subheader("📊 Histograma de puntos con riesgo GPS")
+        st.altair_chart(
+            alt.Chart(df_quality).mark_bar().encode(
+                x=alt.X("Riesgo:O", title="Riesgo de interferencia"),
+                y=alt.Y("count():Q", title="Número de puntos")
+            ).properties(title="Distribución de calidad GPS", height=200),
+            use_container_width=True
+        )
+
     else:
         st.info("✅ No se encontraron zonas con edificios altos o clima adverso.")
 else:
