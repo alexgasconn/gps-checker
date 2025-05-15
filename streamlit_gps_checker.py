@@ -16,6 +16,11 @@ radius_m = st.sidebar.slider("Distancia de búsqueda (m)", 10, 200, 50)
 min_height = st.sidebar.slider("Altura mínima edificio (m)", 5, 100, 15)
 
 # Funciones
+def downsample(points, step):
+    """
+    Reduce la lista de puntos GPS tomando solo 1 de cada 'step' puntos.
+    """
+    return points[::step] if step > 1 else points
 
 
 def read_gpx_points(file):
@@ -69,6 +74,10 @@ def buildings_near(point, buildings, radius, height_thresh):
 if uploaded_file:
     st.title("📍 Zonas con posible interferencia GPS")
     points = read_gpx_points(uploaded_file)
+    step = st.sidebar.slider("Reducir puntos (1 = sin filtro)", 1, 20, 5)
+    points = downsample(points, step)
+
+
     danger_zones = []
 
     with st.spinner("Procesando puntos del recorrido..."):
