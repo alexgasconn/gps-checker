@@ -1,3 +1,4 @@
+
 import streamlit as st
 import gpxpy
 import requests
@@ -8,6 +9,7 @@ import pydeck as pdk
 import time
 from datetime import datetime
 import altair as alt
+import random
 
 st.set_page_config(page_title="GPS Interference & Precision Analyzer", layout="wide")
 
@@ -16,8 +18,35 @@ st.sidebar.title("🔍 Parámetros de análisis")
 uploaded_file = st.sidebar.file_uploader("Sube tu archivo GPX", type="gpx")
 radius_m = st.sidebar.slider("Distancia de búsqueda (m)", 10, 200, 50)
 min_height = st.sidebar.slider("Altura mínima edificio (m)", 5, 100, 15)
+skip_downsample = st.sidebar.checkbox("No reducir puntos (usar todos)", value=False)
+add_randomness = st.sidebar.checkbox("Añadir pequeña aleatoriedad al riesgo", value=False)
 
 # Funciones
+def downsample(points, step):
+    return points[::step] if step > 1 else points
+
+def read_gpx_points(file):
+    gpx = gpxpy.parse(file)
+    return [(p.latitude, p.longitude, p.time) for track in gpx.tracks
+            for segment in track.segments
+            for p in segment.points if p.time]
+
+def overpass_query(lat, lon, radius_m):
+    radius_deg = radius_m / 111000
+    lat1, lon1 = lat - radius_deg, lon - radius_deg
+    lat2, lon2 = lat + radius_deg, lon + radius_deg
+    query = f"""
+[out:json][timeout:25];
+(
+  way["building"]({lat1},{lon1},{lat2},{lon2});
+);
+out center tags;
+"""
+    r = requests.get("http://overpass-api.de/api/interpreter", params={"data": query})
+    r.raise_for_status()
+    return r.json()
+
+
 def downsample(points, step):
     return points[::step] if step > 1 else points
 
