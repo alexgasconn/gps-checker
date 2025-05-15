@@ -1,4 +1,3 @@
-
 import streamlit as st
 import gpxpy
 import requests
@@ -9,7 +8,6 @@ import pydeck as pdk
 import time
 from datetime import datetime
 import altair as alt
-import random
 
 st.set_page_config(page_title="GPS Interference & Precision Analyzer", layout="wide")
 
@@ -20,33 +18,9 @@ radius_m = st.sidebar.slider("Distancia de búsqueda (m)", 10, 200, 50)
 min_height = st.sidebar.slider("Altura mínima edificio (m)", 5, 100, 15)
 skip_downsample = st.sidebar.checkbox("No reducir puntos (usar todos)", value=False)
 add_randomness = st.sidebar.checkbox("Añadir pequeña aleatoriedad al riesgo", value=False)
+skip_weather = st.sidebar.checkbox("Omitir análisis meteorológico (más rápido)", value=True)
 
 # Funciones
-def downsample(points, step):
-    return points[::step] if step > 1 else points
-
-def read_gpx_points(file):
-    gpx = gpxpy.parse(file)
-    return [(p.latitude, p.longitude, p.time) for track in gpx.tracks
-            for segment in track.segments
-            for p in segment.points if p.time]
-
-def overpass_query(lat, lon, radius_m):
-    radius_deg = radius_m / 111000
-    lat1, lon1 = lat - radius_deg, lon - radius_deg
-    lat2, lon2 = lat + radius_deg, lon + radius_deg
-    query = f"""
-[out:json][timeout:25];
-(
-  way["building"]({lat1},{lon1},{lat2},{lon2});
-);
-out center tags;
-"""
-    r = requests.get("http://overpass-api.de/api/interpreter", params={"data": query})
-    r.raise_for_status()
-    return r.json()
-
-
 def downsample(points, step):
     return points[::step] if step > 1 else points
 
@@ -126,6 +100,12 @@ def get_weather_data(lat, lon, dt):
     except:
         return {"clouds": None, "precip": None, "visibility": None}
 
+def compute_weather_score(clouds, precip, visibility):
+    if clouds is None or precip is None or visibility is None:
+        return None
+    score = 100 - (clouds * 0.3 + precip * 5 + (10 - min(visibility, 10)) * 5)
+    return max(0, min(100, score))
+
 # Main
 if uploaded_file:
     st.title("📍 Análisis de Precisión GPS")
@@ -133,8 +113,10 @@ if uploaded_file:
     raw_points = read_gpx_points(uploaded_file)
     num_raw = len(raw_points)
 
-    # Downsampling agresivo
-    if num_raw <= 300:
+    # Downsampling
+    if skip_downsample:
+        step = 1
+    elif num_raw <= 300:
         step = 1
     elif num_raw <= 1000:
         step = 3
@@ -149,7 +131,7 @@ if uploaded_file:
 
     danger_zones = []
     danger_indices = set()
-    total_points = len(points)
+    weather_scores = []
 
     progress_bar = st.progress(0, text="⏳ Analizando puntos...")
     status_text = st.empty()
@@ -159,8 +141,16 @@ if uploaded_file:
             try:
                 buildings = overpass_query(lat, lon, radius_m)
                 nearby = buildings_near((lat, lon), buildings, radius_m, min_height)
-                if nearby:
+
+                if not skip_weather:
                     weather = get_weather_data(lat, lon, t)
+                    score = compute_weather_score(weather["clouds"], weather["precip"], weather["visibility"])
+                    if score is not None:
+                        weather_scores.append(score)
+                else:
+                    weather = {"clouds": None, "precip": None, "visibility": None}
+
+                if nearby:
                     danger_zones.append({
                         "index": i,
                         "lat": lat,
@@ -173,16 +163,21 @@ if uploaded_file:
             except Exception as e:
                 st.warning(f"Error en punto #{i}: {e}")
 
-            percent = int((i + 1) / total_points * 100)
-            progress_bar.progress((i + 1) / total_points, text=f"⏳ Analizando puntos... {percent}%")
-            status_text.text(f"{i+1}/{total_points} puntos analizados")
-            time.sleep(0.1)
+            percent = int((i + 1) / len(points) * 100)
+            progress_bar.progress((i + 1) / len(points), text=f"⏳ Analizando puntos... {percent}%")
+            status_text.text(f"{i + 1}/{len(points)} puntos analizados")
+            time.sleep(0.01)
 
     status_text.empty()
     progress_bar.empty()
 
     danger_ratio = len(danger_indices) / len(points)
     quality = estimate_gps_quality(danger_ratio)
+
+    if weather_scores and not skip_weather:
+        avg_weather_score = sum(weather_scores) / len(weather_scores)
+        st.sidebar.markdown(f"🌦️ Clima estimado: {avg_weather_score:.1f}/100")
+
     st.subheader(f"📡 Calificación estimada de precisión GPS: {quality}")
 
     if danger_zones:
@@ -244,7 +239,7 @@ if uploaded_file:
             ],
         ))
 
-        # Gráficas secundarias
+        # Gráficas
         st.subheader("📈 Calidad GPS (%) vs. Puntos del recorrido")
         quality_series = [1 if i in danger_indices else 0 for i in range(len(points))]
         df_quality = pd.DataFrame({
