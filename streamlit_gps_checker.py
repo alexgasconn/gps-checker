@@ -5,8 +5,10 @@ from shapely.geometry import Point
 from geopy.distance import geodesic
 import pandas as pd
 import pydeck as pdk
+import time
+from datetime import datetime
 
-st.set_page_config(page_title="GPS Interference Checker", layout="wide")
+st.set_page_config(page_title="GPS Interference & Precision Analyzer", layout="wide")
 
 # Sidebar
 st.sidebar.title("🔍 Parámetros de análisis")
@@ -20,9 +22,9 @@ def downsample(points, step):
 
 def read_gpx_points(file):
     gpx = gpxpy.parse(file)
-    return [(p.latitude, p.longitude) for track in gpx.tracks
+    return [(p.latitude, p.longitude, p.time) for track in gpx.tracks
             for segment in track.segments
-            for p in segment.points]
+            for p in segment.points if p.time]
 
 def overpass_query(lat, lon, radius_m):
     radius_deg = radius_m / 111000
@@ -62,8 +64,8 @@ def buildings_near(point, buildings, radius, height_thresh):
 def build_colored_segments(points, danger_indices):
     segments = []
     for i in range(len(points) - 1):
-        lat1, lon1 = points[i]
-        lat2, lon2 = points[i + 1]
+        lat1, lon1 = points[i][:2]
+        lat2, lon2 = points[i + 1][:2]
         is_danger = i in danger_indices or i + 1 in danger_indices
         color = [200, 30, 0] if is_danger else [50, 200, 50]
         segments.append({
@@ -72,15 +74,36 @@ def build_colored_segments(points, danger_indices):
         })
     return segments
 
-import time  # al principio del archivo
+def estimate_gps_quality(danger_ratio):
+    if danger_ratio > 0.5:
+        return "❌ Baja"
+    elif danger_ratio > 0.2:
+        return "⚠️ Media"
+    else:
+        return "✅ Alta"
 
+def get_weather_data(lat, lon, dt):
+    iso_time = dt.strftime('%Y-%m-%dT%H:%M')
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=cloudcover,precipitation,visibility&start={iso_time}&end={iso_time}&timezone=UTC"
+    try:
+        r = requests.get(url)
+        r.raise_for_status()
+        data = r.json()
+        clouds = data.get("hourly", {}).get("cloudcover", [None])[0]
+        rain = data.get("hourly", {}).get("precipitation", [None])[0]
+        vis = data.get("hourly", {}).get("visibility", [None])[0]
+        return {"clouds": clouds, "precip": rain, "visibility": vis}
+    except:
+        return {"clouds": None, "precip": None, "visibility": None}
+
+# Main
 if uploaded_file:
-    st.title("📍 Zonas con posible interferencia GPS")
+    st.title("📍 Análisis de Precisión GPS")
 
     raw_points = read_gpx_points(uploaded_file)
     num_raw = len(raw_points)
 
-    # Downsampling más agresivo
+    # Downsampling agresivo
     if num_raw <= 300:
         step = 1
     elif num_raw <= 1000:
@@ -102,18 +125,19 @@ if uploaded_file:
     status_text = st.empty()
 
     with st.spinner("Procesando puntos del recorrido..."):
-        for i, point in enumerate(points):
-            lat, lon = point
+        for i, (lat, lon, t) in enumerate(points):
             try:
                 buildings = overpass_query(lat, lon, radius_m)
-                nearby = buildings_near(point, buildings, radius_m, min_height)
+                nearby = buildings_near((lat, lon), buildings, radius_m, min_height)
                 if nearby:
+                    weather = get_weather_data(lat, lon, t)
                     danger_zones.append({
                         "index": i,
                         "lat": lat,
                         "lon": lon,
+                        "time": t,
                         "num_buildings": len(nearby),
-                        "buildings": nearby
+                        "weather": weather
                     })
                     danger_indices.add(i)
             except Exception as e:
@@ -122,10 +146,74 @@ if uploaded_file:
             percent = int((i + 1) / total_points * 100)
             progress_bar.progress((i + 1) / total_points, text=f"⏳ Analizando puntos... {percent}%")
             status_text.text(f"{i+1}/{total_points} puntos analizados")
-            time.sleep(0.1)  # suaviza carga y evita abuso de API
+            time.sleep(0.1)
 
     status_text.empty()
     progress_bar.empty()
 
+    danger_ratio = len(danger_indices) / len(points)
+    quality = estimate_gps_quality(danger_ratio)
+    st.subheader(f"📡 Calificación estimada de precisión GPS: {quality}")
+
+    if danger_zones:
+        df = pd.DataFrame([{**dz, **dz['weather']} for dz in danger_zones])
+        df = df.drop(columns=["weather"])
+        st.success(f"Se encontraron {len(danger_zones)} puntos con condiciones adversas.")
+        st.dataframe(df)
+
+        st.subheader("🗺️ Mapa de zonas peligrosas")
+        map_df = pd.DataFrame([{
+            "lat": dz["lat"],
+            "lon": dz["lon"],
+            "elev": dz["num_buildings"] * 5
+        } for dz in danger_zones])
+
+        st.pydeck_chart(pdk.Deck(
+            initial_view_state=pdk.ViewState(
+                latitude=map_df["lat"].mean(),
+                longitude=map_df["lon"].mean(),
+                zoom=15,
+                pitch=45,
+            ),
+            layers=[
+                pdk.Layer(
+                    "ColumnLayer",
+                    data=map_df,
+                    get_position='[lon, lat]',
+                    get_elevation='elev',
+                    elevation_scale=10,
+                    radius=15,
+                    get_fill_color='[200, 30, 0, 160]',
+                    pickable=True,
+                    auto_highlight=True,
+                )
+            ],
+        ))
+
+        st.subheader("📍 Recorrido completo con color de riesgo")
+        segments = build_colored_segments(points, danger_indices)
+        segment_df = pd.DataFrame(segments)
+
+        st.pydeck_chart(pdk.Deck(
+            initial_view_state=pdk.ViewState(
+                latitude=sum(p[0] for p in points) / len(points),
+                longitude=sum(p[1] for p in points) / len(points),
+                zoom=15,
+                pitch=0,
+            ),
+            layers=[
+                pdk.Layer(
+                    "PathLayer",
+                    data=segment_df,
+                    get_path="path",
+                    get_color="color",
+                    width_scale=3,
+                    width_min_pixels=2,
+                    pickable=True,
+                )
+            ],
+        ))
+    else:
+        st.info("✅ No se encontraron zonas con edificios altos o clima adverso.")
 else:
     st.info("📂 Sube un archivo GPX para comenzar.")
